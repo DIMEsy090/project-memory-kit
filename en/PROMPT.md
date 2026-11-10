@@ -19,6 +19,7 @@ Everything below follows from five rules. Where the scheme doesn't cover a case,
 - See what already exists: `CLAUDE.md`, `AGENTS.md`, a folder with `.obsidian`, `docs/`, notes.
 - The default vault folder is `Vault/` in the project root.
 - If the project already has a vault, do not rename or move its folders. Fit the scheme to it: change the settings at the top of the script (`CARDS`, `STATUSES` and their neighbours) and the folder names in the `CLAUDE.md` block. Show me what maps to what and wait for my "yes".
+- Rewriting old cards in bulk is usually unnecessary. The script reads the type from a tag (`tags: [type/idea]`) and the summary from a `**Summary:**`, `**What:**` or `**Who:**` line in the text; a short card (up to 700 characters) needs no summary. Put reports and old documents into `ARCHIVE`, folders a script writes from code into `GENERATED`, and service note types into `NOT_CARDS`. Run `check` and show me how many issues remain and of what kind.
 - Delete or move nothing without my "yes".
 
 ## Step 1. Structure
@@ -137,13 +138,18 @@ Create `Vault/_memory.py` verbatim. It is already tested. If `python` is not fou
 ```python
 #!/usr/bin/env python3
 # Project memory: card list and vault check. Lives in the vault root, no dependencies.
-USAGE = """\
-python _memory.py list [folder] [--status status] [--find word]   one line per card: [status] name — summary
+USAGE = """python _memory.py list [folder] [--status status] [--find word]   one line per card: [status] name — summary
 python _memory.py check                                          vault check; exit code 1 if anything is found"""
 CARDS = ("Ideas/", "Decisions/", "Knowledge/")  # folders that hold cards
-ARCHIVE, INBOX, NOW = "Archive/", "Inbox/", "Now.md"
+ARCHIVE = ("Archive/",)  # folders and files that are not checked; add your own
+INBOX, NOW = "Inbox/", "Now.md"
 SKIP = {".obsidian", ".git", ".trash", "Templates"}
 TYPE, STATUS, SUMMARY = "type", "status", "summary"
+TAG_TYPE = "type/"  # the type can also be a tag: tags: [type/idea]
+BODY_LABELS = ("Summary", "What", "Who")  # the summary can also be a "**Summary:** …" line in the text
+SHORT = 700  # a shorter card is described by its name and needs no summary
+GENERATED = ()  # folders a script writes from code: no summary required there
+NOT_CARDS = set()  # types of index or service notes inside card folders, e.g. {"process"}
 STATUSES = {
     "idea": ["new", "decided", "in progress", "done", "postponed", "rejected", "replaced"],
     "decision": ["active", "replaced"],
@@ -155,7 +161,7 @@ MSG = {
     "total": "total",
     "type": "missing or unknown `type`",
     "status": "status not in the dictionary",
-    "summary": "no `summary`",
+    "summary": "long card without a `summary`",
     "long": "`summary` longer than 160 characters",
     "big": "card over 6000 characters: split it or move the details to Archive",
     "inbox": "inbox item not processed",
@@ -188,7 +194,9 @@ def opt(name):
 ROOT = os.path.abspath(opt("--root") or os.path.dirname(os.path.abspath(__file__)))
 FM = re.compile(r"\A\ufeff?---\r?\n(.*?)\r?\n---", re.S)
 KEY = re.compile(r"^([^\s:#-][^:\n]*):[ \t]*(.*)$", re.M)
-LINK = re.compile(r"\[\[([^\]|#]+)")
+TAGTYPE = re.compile(re.escape(TAG_TYPE) + r"([^\s,\]\"']+)")
+BODYSUM = re.compile(r"^\*\*(?:" + "|".join(map(re.escape, BODY_LABELS)) + r"):\*\*[ \t]*(.+)$", re.M)
+LINK = re.compile(r"\[\[([^\]|#\n]+)(?:[|#][^\]\n]*)?\]\]")
 CODE = re.compile(r"```.*?```|`[^`\n]*`", re.S)
 
 
@@ -204,8 +212,30 @@ def load():
                 text = open(path, encoding="utf-8", errors="replace").read()
                 m = FM.match(text)
                 fm = {k.strip(): v.strip().strip("\"'") for k, v in KEY.findall(m.group(1))} if m else {}
+                if m and not fm.get(TYPE):
+                    tag = TAGTYPE.search(m.group(1))
+                    if tag:
+                        fm[TYPE] = tag.group(1)
                 notes.append((os.path.relpath(path, ROOT).replace(os.sep, "/"), stem, fm, text))
     return sorted(notes), targets
+
+
+def summary_of(fm, text):
+    s = fm.get(SUMMARY, "")
+    if not s:
+        m = BODYSUM.search(text)
+        if m:
+            s = re.sub(r"\[\[(?:[^\]|]*\|)?([^\]]*)\]\]", r"\1", m.group(1)).replace("**", "").strip()
+            s = s if len(s) <= 150 else s[:147].rstrip() + "…"
+    return s
+
+
+def self_described(rel, text):
+    return rel.startswith(GENERATED) or len(FM.sub("", text, count=1)) <= SHORT
+
+
+def is_card(rel, fm):
+    return rel.startswith(CARDS) and not rel.startswith(ARCHIVE) and fm.get(TYPE) not in NOT_CARDS
 
 
 def cmd_list():
@@ -213,18 +243,20 @@ def cmd_list():
     where = (ARGS[1].strip("/") + "/") if len(ARGS) > 1 else CARDS
     notes, _ = load()
     head, n = None, 0
-    for rel, stem, fm, _text in notes:
-        if not rel.startswith(where):
+    for rel, stem, fm, text in notes:
+        if not rel.startswith(where) or not is_card(rel, fm):
             continue
         if status and fm.get(STATUS) != status:
             continue
-        if find and find not in f"{stem} {fm.get(SUMMARY, '')} {fm.get('tags', '')}".lower():
+        summary = summary_of(fm, text)
+        if find and find not in f"{stem} {summary} {fm.get('tags', '')}".lower():
             continue
         folder = rel.rsplit("/", 1)[0]
         if folder != head:
             head = folder
             print(f"\n# {folder}")
-        print(f"[{fm.get(STATUS) or '?'}] {stem} — {fm.get(SUMMARY) or MSG['empty']}")
+        tail = f" — {summary}" if summary else ("" if self_described(rel, text) else f" — {MSG['empty']}")
+        print(f"[{fm.get(STATUS) or '?'}] {stem}{tail}")
         n += 1
     print(f"\n{MSG['total']}: {n}")
 
@@ -239,15 +271,15 @@ def cmd_check():
     for rel, stem, fm, text in notes:
         if rel.startswith(ARCHIVE):
             continue
-        if rel.startswith(CARDS):
-            kind, status, summary = fm.get(TYPE), fm.get(STATUS), fm.get(SUMMARY, "")
+        if is_card(rel, fm):
+            kind, status = fm.get(TYPE), fm.get(STATUS)
             if kind not in STATUSES:
                 bad(MSG["type"], rel)
             elif status not in STATUSES[kind]:
                 bad(MSG["status"], f'{rel}: "{status}"')
-            if not summary:
+            if not summary_of(fm, text) and not self_described(rel, text):
                 bad(MSG["summary"], rel)
-            elif len(summary) > 160:
+            elif len(fm.get(SUMMARY, "")) > 160:
                 bad(MSG["long"], rel)
             if len(text) > 6000:
                 bad(MSG["big"], rel)
@@ -277,7 +309,7 @@ def cmd_check():
         if len(items) > 12:
             print("  " + MSG["more"].format(len(items) - 12))
     total = sum(len(v) for v in found.values())
-    print("\n" + MSG["result"].format(sum(n[0].startswith(CARDS) for n in notes), total))
+    print("\n" + MSG["result"].format(sum(is_card(n[0], n[2]) for n in notes), total))
     sys.exit(1 if total else 0)
 
 
@@ -322,7 +354,7 @@ Everything known about the project lives in `Vault/`, not in chat. Use Claude's 
 - After writing, say so in chat in one line: `📌 [[Card name]] — what was recorded`. No such line means nothing was recorded.
 - Delete nothing: change the status and write the reason.
 
-**A card.** One file, one thought. Required properties: `type`, `status`, `summary` (one line of up to 150 characters that makes sense on its own; quote it if it contains a colon), `date`. Status lives only in the properties. Links are always `[[Name]]`; note names are unique. A card longer than 80 lines → split it or move the details to `Archive/` with a link.
+**A card.** One file, one thought. Required properties: `type`, `status`, `summary` (one line of up to 150 characters that makes sense on its own; quote it if it contains a colon), `date`. A short card (up to 700 characters) can skip the summary if its name says it all. Status lives only in the properties. Links are always `[[Name]]`; note names are unique. A card longer than 80 lines → split it or move the details to `Archive/` with a link.
 
 **Statuses.** Idea: new · decided · in progress · done · postponed · rejected · replaced. Decision: active · replaced. Knowledge: current · draft · outdated.
 

@@ -114,14 +114,14 @@ It fits game design, product work, research and study notes as well as code.
 - **Simple parser.** The script reads top-level `key: value` properties with regular expressions, not a YAML parser. Nested properties are ignored.
 - **One language per vault.** Folder names, property keys and statuses are fixed per language version.
 - **Single writer.** There is no locking. Two agents editing one card at once will conflict, and git is the only safety net.
-- **Young.** One author, one real vault.
+- **Young.** One author, two real vaults.
 
 ## What was tested and what was not
 
 Tested:
 
-- The script, in both languages: `python tests/test_kit.py` builds a clean and a broken sample vault and runs 32 checks.
-- The script, read-only, on a real private vault of 1,223 notes (about 5.3 million characters of Russian text): `check` finished in 0.3 seconds.
+- The script, in both languages: `python tests/test_kit.py` builds a clean and a broken sample vault and runs 40 checks.
+- The scheme on two real private game-design vaults that already existed (1,000 and 191 cards). Nothing was renamed: the script read the existing `тип/…` tags and `**Суть:**` lines, and short cards were accepted as they were. One vault went from 420 check issues to 15 after removing a status that every card stored three times; the other ended at 19, all of them oversized cards. On one of them the instructions read at session start shrank from about 18,500 to about 7,000 estimated tokens. `check` on 1,223 notes takes 0.3 seconds.
 - Windows 11, Python 3.12, from PowerShell and Git Bash.
 
 Not tested yet:
@@ -156,6 +156,7 @@ Each rule in the kit answers one of these.
 ## Adapting and contributing
 
 - To rename folders or change statuses, edit the settings at the top of `_memory.py` and the matching names in the `CLAUDE.md` block.
+- For a vault that already exists, the same settings cover the usual differences without rewriting cards: `TAG_TYPE` reads the type from a tag, `BODY_LABELS` reads the summary from a `**Summary:**`-style line, `SHORT` lets short cards go without a summary, `ARCHIVE` takes extra folders and files, `GENERATED` marks folders written from code, `NOT_CARDS` skips index notes.
 - To run the check on every commit, call `python Vault/_memory.py check` from a pre-commit hook.
 - The script exists twice: as `en/_memory.py` and `ru/_memory.py`, and inside each `PROMPT.md`. After editing a script, run `python tools/embed.py` and then `python tests/test_kit.py`. The test fails if the copies differ or if the logic differs between languages.
 

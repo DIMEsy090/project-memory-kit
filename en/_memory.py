@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 # Project memory: card list and vault check. Lives in the vault root, no dependencies.
-USAGE = """\
-python _memory.py list [folder] [--status status] [--find word]   one line per card: [status] name — summary
+USAGE = """python _memory.py list [folder] [--status status] [--find word]   one line per card: [status] name — summary
 python _memory.py check                                          vault check; exit code 1 if anything is found"""
 CARDS = ("Ideas/", "Decisions/", "Knowledge/")  # folders that hold cards
-ARCHIVE, INBOX, NOW = "Archive/", "Inbox/", "Now.md"
+ARCHIVE = ("Archive/",)  # folders and files that are not checked; add your own
+INBOX, NOW = "Inbox/", "Now.md"
 SKIP = {".obsidian", ".git", ".trash", "Templates"}
 TYPE, STATUS, SUMMARY = "type", "status", "summary"
+TAG_TYPE = "type/"  # the type can also be a tag: tags: [type/idea]
+BODY_LABELS = ("Summary", "What", "Who")  # the summary can also be a "**Summary:** …" line in the text
+SHORT = 700  # a shorter card is described by its name and needs no summary
+GENERATED = ()  # folders a script writes from code: no summary required there
+NOT_CARDS = set()  # types of index or service notes inside card folders, e.g. {"process"}
 STATUSES = {
     "idea": ["new", "decided", "in progress", "done", "postponed", "rejected", "replaced"],
     "decision": ["active", "replaced"],
@@ -18,7 +23,7 @@ MSG = {
     "total": "total",
     "type": "missing or unknown `type`",
     "status": "status not in the dictionary",
-    "summary": "no `summary`",
+    "summary": "long card without a `summary`",
     "long": "`summary` longer than 160 characters",
     "big": "card over 6000 characters: split it or move the details to Archive",
     "inbox": "inbox item not processed",
@@ -51,7 +56,9 @@ def opt(name):
 ROOT = os.path.abspath(opt("--root") or os.path.dirname(os.path.abspath(__file__)))
 FM = re.compile(r"\A\ufeff?---\r?\n(.*?)\r?\n---", re.S)
 KEY = re.compile(r"^([^\s:#-][^:\n]*):[ \t]*(.*)$", re.M)
-LINK = re.compile(r"\[\[([^\]|#]+)")
+TAGTYPE = re.compile(re.escape(TAG_TYPE) + r"([^\s,\]\"']+)")
+BODYSUM = re.compile(r"^\*\*(?:" + "|".join(map(re.escape, BODY_LABELS)) + r"):\*\*[ \t]*(.+)$", re.M)
+LINK = re.compile(r"\[\[([^\]|#\n]+)(?:[|#][^\]\n]*)?\]\]")
 CODE = re.compile(r"```.*?```|`[^`\n]*`", re.S)
 
 
@@ -67,8 +74,30 @@ def load():
                 text = open(path, encoding="utf-8", errors="replace").read()
                 m = FM.match(text)
                 fm = {k.strip(): v.strip().strip("\"'") for k, v in KEY.findall(m.group(1))} if m else {}
+                if m and not fm.get(TYPE):
+                    tag = TAGTYPE.search(m.group(1))
+                    if tag:
+                        fm[TYPE] = tag.group(1)
                 notes.append((os.path.relpath(path, ROOT).replace(os.sep, "/"), stem, fm, text))
     return sorted(notes), targets
+
+
+def summary_of(fm, text):
+    s = fm.get(SUMMARY, "")
+    if not s:
+        m = BODYSUM.search(text)
+        if m:
+            s = re.sub(r"\[\[(?:[^\]|]*\|)?([^\]]*)\]\]", r"\1", m.group(1)).replace("**", "").strip()
+            s = s if len(s) <= 150 else s[:147].rstrip() + "…"
+    return s
+
+
+def self_described(rel, text):
+    return rel.startswith(GENERATED) or len(FM.sub("", text, count=1)) <= SHORT
+
+
+def is_card(rel, fm):
+    return rel.startswith(CARDS) and not rel.startswith(ARCHIVE) and fm.get(TYPE) not in NOT_CARDS
 
 
 def cmd_list():
@@ -76,18 +105,20 @@ def cmd_list():
     where = (ARGS[1].strip("/") + "/") if len(ARGS) > 1 else CARDS
     notes, _ = load()
     head, n = None, 0
-    for rel, stem, fm, _text in notes:
-        if not rel.startswith(where):
+    for rel, stem, fm, text in notes:
+        if not rel.startswith(where) or not is_card(rel, fm):
             continue
         if status and fm.get(STATUS) != status:
             continue
-        if find and find not in f"{stem} {fm.get(SUMMARY, '')} {fm.get('tags', '')}".lower():
+        summary = summary_of(fm, text)
+        if find and find not in f"{stem} {summary} {fm.get('tags', '')}".lower():
             continue
         folder = rel.rsplit("/", 1)[0]
         if folder != head:
             head = folder
             print(f"\n# {folder}")
-        print(f"[{fm.get(STATUS) or '?'}] {stem} — {fm.get(SUMMARY) or MSG['empty']}")
+        tail = f" — {summary}" if summary else ("" if self_described(rel, text) else f" — {MSG['empty']}")
+        print(f"[{fm.get(STATUS) or '?'}] {stem}{tail}")
         n += 1
     print(f"\n{MSG['total']}: {n}")
 
@@ -102,15 +133,15 @@ def cmd_check():
     for rel, stem, fm, text in notes:
         if rel.startswith(ARCHIVE):
             continue
-        if rel.startswith(CARDS):
-            kind, status, summary = fm.get(TYPE), fm.get(STATUS), fm.get(SUMMARY, "")
+        if is_card(rel, fm):
+            kind, status = fm.get(TYPE), fm.get(STATUS)
             if kind not in STATUSES:
                 bad(MSG["type"], rel)
             elif status not in STATUSES[kind]:
                 bad(MSG["status"], f'{rel}: "{status}"')
-            if not summary:
+            if not summary_of(fm, text) and not self_described(rel, text):
                 bad(MSG["summary"], rel)
-            elif len(summary) > 160:
+            elif len(fm.get(SUMMARY, "")) > 160:
                 bad(MSG["long"], rel)
             if len(text) > 6000:
                 bad(MSG["big"], rel)
@@ -140,7 +171,7 @@ def cmd_check():
         if len(items) > 12:
             print("  " + MSG["more"].format(len(items) - 12))
     total = sum(len(v) for v in found.values())
-    print("\n" + MSG["result"].format(sum(n[0].startswith(CARDS) for n in notes), total))
+    print("\n" + MSG["result"].format(sum(is_card(n[0], n[2]) for n in notes), total))
     sys.exit(1 if total else 0)
 
 
